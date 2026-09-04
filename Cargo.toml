@@ -1,0 +1,17 @@
+[package]
+name = "symplectic_test"
+version = "0.1.0"
+edition = "2021"
+
+[profile.release]
+opt-level = 3
+overflow-checks = false
+
+[dependencies]
+crossterm = "0.29.0"
+futures-util = "0.3.34"
+ratatui = { version = "0.30.2", features = ["crossterm"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+tokio = { version = "1.53.1", features = ["full"] }
+tokio-tungstenite = { version = "0.30.0", features = ["native-tls"] }

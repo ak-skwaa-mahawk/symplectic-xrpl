@@ -1,0 +1,4 @@
+/target/
+**/*.rs.bk
+*.log
+run_diag.sh
