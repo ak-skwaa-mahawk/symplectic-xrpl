@@ -1,9 +1,9 @@
 use std::io;
 use std::time::{Duration, Instant};
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind},
+    event::{self, Event, KeyCode},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen, size},
 };
 use ratatui::{
     backend::CrosstermBackend,
@@ -27,23 +27,18 @@ enum DisplayMode {
 }
 
 #[tokio::main]
-async fn main() {
-    if let Err(e) = run_app().await {
-        eprintln!("\r\n[XRPL TUI Error]: {e}\r\n");
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let (cols, rows) = size().unwrap_or((0, 0));
+    if cols == 0 || rows == 0 {
+        eprintln!("Terminal area unavailable.");
+        return Ok(());
     }
-}
 
-async fn run_app() -> Result<(), Box<dyn std::error::Error>> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
-
-    // Aggressively flush standard input before starting
-    while event::poll(Duration::from_millis(100)).unwrap_or(false) {
-        let _ = event::read();
-    }
 
     let (feed_tx, mut feed_rx) = mpsc::channel::<XrplStreamEvent>(2000);
     tokio::spawn(async move {
@@ -62,20 +57,19 @@ async fn run_app() -> Result<(), Box<dyn std::error::Error>> {
     let mut total_admitted = 0u64;
     let mut connected = false;
     let mut mode = DisplayMode::Spatial;
-    let start_time = Instant::now();
+    let mut frame_count = 0u64;
 
     'main_loop: loop {
+        frame_count += 1;
+
         while let Ok(ev) = feed_rx.try_recv() {
             connected = true;
             match ev {
-                XrplStreamEvent::Tx { drops, account } => {
-                    pending_txs.push((drops, account));
-                }
+                XrplStreamEvent::Tx { drops, account } => pending_txs.push((drops, account)),
                 XrplStreamEvent::LedgerClosed { ledger_index, close_time_resolution, tx_count } => {
                     let now = Instant::now();
                     let elapsed = now.duration_since(last_ledger_instant).as_secs_f64();
                     last_ledger_instant = now;
-
                     let dt = if elapsed > 0.1 && elapsed < 10.0 {
                         0.05 * (elapsed / close_time_resolution as f64)
                     } else {
@@ -118,23 +112,19 @@ async fn run_app() -> Result<(), Box<dyn std::error::Error>> {
         terminal.draw(|f| {
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Length(3),
-                    Constraint::Min(10),
-                    Constraint::Length(7),
-                ])
+                .constraints([Constraint::Length(3), Constraint::Min(10), Constraint::Length(7)])
                 .split(f.area());
 
             let status_color = if connected { Color::Cyan } else { Color::Yellow };
             let mode_str = match mode {
-                DisplayMode::Spatial => "[SPATIAL: p_i]",
-                DisplayMode::NormalModes => "[FOURIER: E_k]",
+                DisplayMode::Spatial => "SPATIAL",
+                DisplayMode::NormalModes => "FOURIER",
             };
 
             let top_text = if connected {
                 format!(
-                    " XRPL PIPELINE {} | Ledger: #{} | Txs: {} | Epoch: #{} | Queue: {} | Adm: {} | 'm': Mode, 'q': Quit ",
-                    mode_str, last_ledger_idx, current_tx_count, current_epoch, pending_txs.len(), total_admitted
+                    " XRPL PIPELINE [{}] | L: #{} | Tx: {} | Ep: #{} | Adm: {} | 'm': Mode, 'q': Quit ",
+                    mode_str, last_ledger_idx, current_tx_count, current_epoch, total_admitted
                 )
             } else {
                 " XRPL PIPELINE | Connecting to wss://s1.ripple.com:51233... ".to_string()
@@ -155,32 +145,23 @@ async fn run_app() -> Result<(), Box<dyn std::error::Error>> {
                 .x_bounds([-50.0, 50.0])
                 .y_bounds([-1000.0, 1000.0])
                 .paint(|ctx| {
-                    ctx.draw(&Points {
-                        coords: &phase_trail,
-                        color: Color::Yellow,
-                    });
+                    ctx.draw(&Points { coords: &phase_trail, color: Color::Yellow });
                 });
             f.render_widget(canvas, mid_chunks[0]);
 
             let (bar_title, bar_data): (&str, Vec<(&str, u64)>) = match mode {
                 DisplayMode::Spatial => {
                     let data = lattice.p.iter().enumerate().map(|(i, &p)| {
-                        let label = match i {
-                            0 => "S0", 1 => "S1", 2 => "S2", 3 => "S3",
-                            4 => "S4", 5 => "S5", 6 => "S6", _ => "S7",
-                        };
-                        (label, p.abs() as u64)
+                        let l = match i { 0 => "S0", 1 => "S1", 2 => "S2", 3 => "S3", 4 => "S4", 5 => "S5", 6 => "S6", _ => "S7" };
+                        (l, p.abs() as u64)
                     }).collect();
                     ("Site Momenta |p_i|", data)
                 }
                 DisplayMode::NormalModes => {
                     let modes = lattice.normal_mode_energies();
                     let data = modes.into_iter().enumerate().map(|(k, e)| {
-                        let label = match k {
-                            0 => "k0", 1 => "k1", 2 => "k2", 3 => "k3",
-                            4 => "k4", 5 => "k5", 6 => "k6", _ => "k7",
-                        };
-                        (label, e as u64)
+                        let l = match k { 0 => "k0", 1 => "k1", 2 => "k2", 3 => "k3", 4 => "k4", 5 => "k5", 6 => "k6", _ => "k7" };
+                        (l, e as u64)
                     }).collect();
                     ("Normal Mode Energies E_k", data)
                 }
@@ -201,7 +182,7 @@ async fn run_app() -> Result<(), Box<dyn std::error::Error>> {
                 .split(chunks[2]);
 
             let sparkline = Sparkline::default()
-                .block(Block::default().borders(Borders::ALL).title("Energy Trajectory (E/10)"))
+                .block(Block::default().borders(Borders::ALL).title("Energy (E/10)"))
                 .style(Style::default().fg(Color::Magenta))
                 .data(&energy_history)
                 .bar_set(symbols::bar::NINE_LEVELS);
@@ -212,14 +193,13 @@ async fn run_app() -> Result<(), Box<dyn std::error::Error>> {
                 .map(|msg| ListItem::new(msg.as_str()).style(Style::default().fg(Color::Red)))
                 .collect();
             let log_list = List::new(log_items)
-                .block(Block::default().borders(Borders::ALL).title("Admission Gate Events"));
+                .block(Block::default().borders(Borders::ALL).title("Gate Rejections"));
             f.render_widget(log_list, bot_chunks[1]);
         })?;
 
         if event::poll(Duration::from_millis(33)).unwrap_or(false) {
             if let Ok(Event::Key(key)) = event::read() {
-                // Ignore any keystrokes sent within the first 1000ms to debounce launch artifacts
-                if start_time.elapsed() > Duration::from_millis(1000) && key.kind == KeyEventKind::Press {
+                if frame_count > 10 {
                     match key.code {
                         KeyCode::Char('q') => break 'main_loop,
                         KeyCode::Char('m') => {
