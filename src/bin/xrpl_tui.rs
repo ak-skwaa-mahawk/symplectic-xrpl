@@ -12,13 +12,19 @@ use ratatui::{
     symbols,
     widgets::{
         canvas::{Canvas, Points},
-        BarChart, Block, Borders, List, ListItem, Sparkline, Paragraph,
+        BarChart, Block, Borders, List, ListItem, Paragraph, Sparkline,
     },
     Terminal,
 };
 use tokio::sync::mpsc;
 use symplectic_test::coupled_lattice::LatticeEngine;
 use symplectic_test::xrpl_feed::{start_xrpl_subscriber, XrplStreamEvent};
+
+#[derive(PartialEq)]
+enum DisplayMode {
+    Spatial,
+    NormalModes,
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -44,9 +50,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut current_tx_count = 0u32;
     let mut total_admitted = 0u64;
     let mut connected = false;
+    let mut mode = DisplayMode::Spatial;
 
     'main_loop: loop {
-        // Drain incoming messages
         while let Ok(ev) = feed_rx.try_recv() {
             connected = true;
             match ev {
@@ -108,10 +114,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .split(f.area());
 
             let status_color = if connected { Color::Cyan } else { Color::Yellow };
+            let mode_str = match mode {
+                DisplayMode::Spatial => "[SPATIAL: p_i]",
+                DisplayMode::NormalModes => "[FOURIER: E_k]",
+            };
+
             let top_text = if connected {
                 format!(
-                    " XRPL DYNAMIC PIPELINE | Ledger: #{} | Ledger Txs: {} | Epoch: #{} | Ingest Queue: {} | Total Adm: {} ",
-                    last_ledger_idx, current_tx_count, current_epoch, pending_txs.len(), total_admitted
+                    " XRPL DYNAMIC PIPELINE {} | Ledger: #{} | Txs: {} | Epoch: #{} | Queue: {} | Adm: {} | 'm': Mode, 'q': Quit ",
+                    mode_str, last_ledger_idx, current_tx_count, current_epoch, pending_txs.len(), total_admitted
                 )
             } else {
                 " XRPL DYNAMIC PIPELINE | Connecting to wss://s1.ripple.com:51233... ".to_string()
@@ -139,20 +150,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 });
             f.render_widget(canvas, mid_chunks[0]);
 
-            let bar_data: Vec<(&str, u64)> = lattice.p.iter().enumerate().map(|(i, &p)| {
-                let label = match i {
-                    0 => "S0", 1 => "S1", 2 => "S2", 3 => "S3",
-                    4 => "S4", 5 => "S5", 6 => "S6", _ => "S7",
-                };
-                (label, p.abs() as u64)
-            }).collect();
+            let (bar_title, bar_data): (&str, Vec<(&str, u64)>) = match mode {
+                DisplayMode::Spatial => {
+                    let data = lattice.p.iter().enumerate().map(|(i, &p)| {
+                        let label = match i {
+                            0 => "S0", 1 => "S1", 2 => "S2", 3 => "S3",
+                            4 => "S4", 5 => "S5", 6 => "S6", _ => "S7",
+                        };
+                        (label, p.abs() as u64)
+                    }).collect();
+                    ("Site Momenta |p_i|", data)
+                }
+                DisplayMode::NormalModes => {
+                    let modes = lattice.normal_mode_energies();
+                    let data = modes.into_iter().enumerate().map(|(k, e)| {
+                        let label = match k {
+                            0 => "k0", 1 => "k1", 2 => "k2", 3 => "k3",
+                            4 => "k4", 5 => "k5", 6 => "k6", _ => "k7",
+                        };
+                        (label, e as u64)
+                    }).collect();
+                    ("Normal Mode Energies E_k", data)
+                }
+            };
 
             let barchart = BarChart::default()
-                .block(Block::default().borders(Borders::ALL).title("Site Momenta (p)"))
+                .block(Block::default().borders(Borders::ALL).title(bar_title))
                 .data(&bar_data)
                 .bar_width(2)
                 .bar_gap(1)
-                .bar_style(Style::default().fg(Color::Green))
+                .bar_style(Style::default().fg(if mode == DisplayMode::Spatial { Color::Green } else { Color::Cyan }))
                 .value_style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
             f.render_widget(barchart, mid_chunks[1]);
 
@@ -177,12 +204,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             f.render_widget(log_list, bot_chunks[1]);
         })?;
 
-        // 30 FPS tick pacing and key event polling
         if event::poll(Duration::from_millis(33))? {
             if let Event::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
-                    if key.code == KeyCode::Char('q') || key.code == KeyCode::Esc {
-                        break 'main_loop;
+                    match key.code {
+                        KeyCode::Char('q') | KeyCode::Esc => break 'main_loop,
+                        KeyCode::Char('m') => {
+                            mode = match mode {
+                                DisplayMode::Spatial => DisplayMode::NormalModes,
+                                DisplayMode::NormalModes => DisplayMode::Spatial,
+                            };
+                        }
+                        _ => {}
                     }
                 }
             }

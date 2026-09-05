@@ -94,3 +94,45 @@ impl LatticeEngine {
 
 // Alias to maintain compatibility with journal.rs
 pub type CoupledLattice = LatticeEngine;
+
+impl LatticeEngine {
+    /// Compute real modal energies E_k using discrete Fourier projection
+    pub fn normal_mode_energies(&self) -> Vec<f64> {
+        let n = self.n_sites;
+        let mut mode_energies = Vec::with_capacity(n);
+
+        for k in 0..n {
+            let mut re_q = 0.0;
+            let mut im_q = 0.0;
+            let mut re_p = 0.0;
+            let mut im_p = 0.0;
+
+            for j in 0..n {
+                let angle = 2.0 * PI * (k * j) as f64 / (n as f64);
+                let cos_val = angle.cos();
+                let sin_val = angle.sin();
+
+                re_q += self.q[j] * cos_val;
+                im_q -= self.q[j] * sin_val;
+
+                re_p += self.p[j] * cos_val;
+                im_p -= self.p[j] * sin_val;
+            }
+
+            let norm_factor = 1.0 / (n as f64).sqrt();
+            re_q *= norm_factor;
+            im_q *= norm_factor;
+            re_p *= norm_factor;
+            im_p *= norm_factor;
+
+            let mod_p2 = re_p.powi(2) + im_p.powi(2);
+            let mod_q2 = re_q.powi(2) + im_q.powi(2);
+
+            let omega_k2 = 4.0 * self.k_coupling * ((PI * k as f64 / n as f64).sin()).powi(2);
+            let e_k = 0.5 * (mod_p2 / self.mass + omega_k2 * mod_q2);
+            mode_energies.push(e_k);
+        }
+
+        mode_energies
+    }
+}
