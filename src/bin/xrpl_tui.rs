@@ -150,7 +150,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let barchart = BarChart::default()
                 .block(Block::default().borders(Borders::ALL).title("Site Momenta (p)"))
                 .data(&bar_data)
-                .bar_width(5)
+                .bar_width(2)
                 .bar_gap(1)
                 .bar_style(Style::default().fg(Color::Green))
                 .value_style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD));

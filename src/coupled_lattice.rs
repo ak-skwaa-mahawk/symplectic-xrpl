@@ -22,7 +22,7 @@ impl LatticeEngine {
             mass: 1.0,
             k_coupling: 0.8,
             d_damping: 0.05,
-            e_max: 3000.0,
+            e_max: 25000.0,
             p_site_max: 30000.0,
             phase_state: 0.0,
             epoch_count: 0,
