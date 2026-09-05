@@ -58,6 +58,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut connected = false;
     let mut mode = DisplayMode::Spatial;
     let mut frame_count = 0u64;
+    let mut exit_reason;
 
     'main_loop: loop {
         frame_count += 1;
@@ -123,7 +124,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let top_text = if connected {
                 format!(
-                    " XRPL PIPELINE [{}] | L: #{} | Tx: {} | Ep: #{} | Adm: {} | 'm': Mode, 'q': Quit ",
+                    " XRPL PIPELINE [{}] | L: #{} | Tx: {} | Ep: #{} | Adm: {} | 'm': Mode, 'Q': Quit ",
                     mode_str, last_ledger_idx, current_tx_count, current_epoch, total_admitted
                 )
             } else {
@@ -199,10 +200,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         if event::poll(Duration::from_millis(33)).unwrap_or(false) {
             if let Ok(Event::Key(key)) = event::read() {
-                if frame_count > 10 {
+                // Ignore key inputs for the first 25 frames to clear command buffer
+                if frame_count > 25 {
                     match key.code {
-                        KeyCode::Char('q') => break 'main_loop,
-                        KeyCode::Char('m') => {
+                        KeyCode::Char('Q') | KeyCode::Char('q') => {
+                            exit_reason = "quit_key";
+                            break 'main_loop;
+                        }
+                        KeyCode::Char('m') | KeyCode::Char('M') => {
                             mode = match mode {
                                 DisplayMode::Spatial => DisplayMode::NormalModes,
                                 DisplayMode::NormalModes => DisplayMode::Spatial,
@@ -218,5 +223,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
+    eprintln!("[xrpl_tui] Exited cleanly after {} frames (reason: {}).", frame_count, exit_reason);
     Ok(())
 }
