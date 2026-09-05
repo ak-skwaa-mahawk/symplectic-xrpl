@@ -12,7 +12,7 @@ use ratatui::{
     symbols,
     widgets::{
         canvas::{Canvas, Points},
-        BarChart, Block, Borders, List, ListItem, Sparkline,
+        BarChart, Block, Borders, List, ListItem, Sparkline, Paragraph,
     },
     Terminal,
 };
@@ -28,8 +28,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let (feed_tx, mut feed_rx) = mpsc::channel::<XrplStreamEvent>(1000);
-    tokio::spawn(start_xrpl_subscriber(feed_tx));
+    let (feed_tx, mut feed_rx) = mpsc::channel::<XrplStreamEvent>(2000);
+    tokio::spawn(async move {
+        start_xrpl_subscriber(feed_tx).await;
+    });
 
     let mut lattice = LatticeEngine::new(8);
     let mut pending_txs: Vec<(u64, String)> = Vec::new();
@@ -41,9 +43,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut last_ledger_instant = Instant::now();
     let mut current_tx_count = 0u32;
     let mut total_admitted = 0u64;
+    let mut connected = false;
 
-    let run_res = loop {
+    'main_loop: loop {
+        // Drain incoming messages
         while let Ok(ev) = feed_rx.try_recv() {
+            connected = true;
             match ev {
                 XrplStreamEvent::Tx { drops, account } => {
                     pending_txs.push((drops, account));
@@ -92,7 +97,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let current_epoch = lattice.epoch_count;
 
-        let _ = terminal.draw(|f| {
+        terminal.draw(|f| {
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
@@ -102,14 +107,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ])
                 .split(f.area());
 
-            let top_text = format!(
-                " XRPL DYNAMIC LEDGER PIPELINE | Ledger: #{} | Ledger Txs: {} | Epoch: #{} | Ingest Queue: {} | Total Adm: {} ",
-                last_ledger_idx, current_tx_count, current_epoch, pending_txs.len(), total_admitted
-            );
-            let top_bar = Block::default()
-                .borders(Borders::ALL)
-                .title(top_text)
-                .style(Style::default().fg(Color::Cyan));
+            let status_color = if connected { Color::Cyan } else { Color::Yellow };
+            let top_text = if connected {
+                format!(
+                    " XRPL DYNAMIC PIPELINE | Ledger: #{} | Ledger Txs: {} | Epoch: #{} | Ingest Queue: {} | Total Adm: {} ",
+                    last_ledger_idx, current_tx_count, current_epoch, pending_txs.len(), total_admitted
+                )
+            } else {
+                " XRPL DYNAMIC PIPELINE | Connecting to wss://s1.ripple.com:51233... ".to_string()
+            };
+
+            let top_bar = Paragraph::new(top_text)
+                .block(Block::default().borders(Borders::ALL))
+                .style(Style::default().fg(status_color));
             f.render_widget(top_bar, chunks[0]);
 
             let mid_chunks = Layout::default()
@@ -165,21 +175,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let log_list = List::new(log_items)
                 .block(Block::default().borders(Borders::ALL).title("Admission Gate Events"));
             f.render_widget(log_list, bot_chunks[1]);
-        });
+        })?;
 
-        if let Ok(true) = event::poll(Duration::from_millis(50)) {
-            if let Ok(Event::Key(key)) = event::read() {
+        // 30 FPS tick pacing and key event polling
+        if event::poll(Duration::from_millis(33))? {
+            if let Event::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
                     if key.code == KeyCode::Char('q') || key.code == KeyCode::Esc {
-                        break Ok(());
+                        break 'main_loop;
                     }
                 }
             }
         }
-    };
+    }
 
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
-    run_res
+    Ok(())
 }
