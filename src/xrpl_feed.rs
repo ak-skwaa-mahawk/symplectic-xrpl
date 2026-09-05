@@ -1,139 +1,87 @@
+use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
-use crate::{SymplecticDDS, TelemetryCoupler};
+use tokio::sync::mpsc;
+use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 
-pub const RIPPLE_EPOCH_OFFSET: i64 = 946_684_800;
-
-#[derive(Debug, Deserialize)]
-pub struct XrplRpcResponse<T> {
-    pub result: T,
-    pub status: String,
+#[derive(Debug, Clone)]
+pub enum XrplStreamEvent {
+    Tx { drops: u64, account: String },
+    LedgerClosed {
+        ledger_index: u64,
+        close_time_resolution: u64,
+        tx_count: u32,
+    },
 }
 
-#[derive(Debug, Deserialize)]
-pub struct TxResult {
-    #[serde(default)]
-    pub validated: bool,
-    #[serde(rename = "Fee")]
-    pub fee: Option<String>,
+#[derive(Deserialize)]
+struct LedgerClosedStreamMsg {
+    #[serde(rename = "type")]
+    msg_type: Option<String>,
+    ledger_index: Option<u64>,
+    txn_count: Option<u32>,
+    #[serde(rename = "close_time_resolution")]
+    close_res: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct TxStreamMsg {
+    transaction: Option<TxInner>,
+}
+
+#[derive(Deserialize)]
+struct TxInner {
+    #[serde(rename = "TransactionType")]
+    tx_type: Option<String>,
+    #[serde(rename = "Account")]
+    account: Option<String>,
     #[serde(rename = "Amount")]
-    pub amount: Option<serde_json::Value>,
-    pub date: Option<i64>,
-    #[serde(rename = "ledger_index")]
-    pub ledger_index: Option<u64>,
+    amount: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct LedgerHeader {
-    pub close_time: i64,
-    pub close_time_resolution: u32,
-    pub total_coins: String,
-    pub ledger_index: u64,
-}
+pub async fn start_xrpl_subscriber(tx: mpsc::Sender<XrplStreamEvent>) {
+    let url = "wss://s1.ripple.com:51233";
 
-#[derive(Debug, Deserialize)]
-pub struct LedgerResult {
-    pub ledger: Option<LedgerHeader>,
-    pub validated: bool,
-}
+    loop {
+        if let Ok((ws_stream, _)) = connect_async(url).await {
+            let (mut write, mut read) = ws_stream.split();
 
-pub struct XrplTelemetryAdapter {
-    pub coupler: TelemetryCoupler,
-    last_close_time: Option<i64>,
-    drops_normalization: f64,
-}
+            let sub_cmd = serde_json::json!({
+                "command": "subscribe",
+                "streams": ["transactions", "ledger"]
+            });
 
-impl XrplTelemetryAdapter {
-    pub fn new(coupler: TelemetryCoupler, drops_normalization: f64) -> Self {
-        Self {
-            coupler,
-            last_close_time: None,
-            drops_normalization, // e.g., 1e-6 to map drops -> XRP, or 1e-8 for scaling
-        }
-    }
+            if write.send(Message::Text(sub_cmd.to_string().into())).await.is_ok() {
+                while let Some(Ok(msg)) = read.next().await {
+                    if let Message::Text(text) = msg {
+                        if let Ok(ledger) = serde_json::from_str::<LedgerClosedStreamMsg>(&text) {
+                            if ledger.msg_type.as_deref() == Some("ledgerClosed") {
+                                if let Some(idx) = ledger.ledger_index {
+                                    let _ = tx.send(XrplStreamEvent::LedgerClosed {
+                                        ledger_index: idx,
+                                        close_time_resolution: ledger.close_res.unwrap_or(4),
+                                        tx_count: ledger.txn_count.unwrap_or(0),
+                                    }).await;
+                                    continue;
+                                }
+                            }
+                        }
 
-    /// Extracts raw XRP drops from an ambiguous Amount field (native drops or issued currency)
-    pub fn extract_drops(amount_val: &serde_json::Value) -> Option<u64> {
-        match amount_val {
-            // Native XRP arrives as a string containing drops integer
-            serde_json::Value::String(s) => s.parse::<u64>().ok(),
-            // Non-XRP issued tokens arrive as {"currency": "...", "value": "..."}
-            serde_json::Value::Object(map) => {
-                map.get("value")
-                    .and_then(|v| v.as_str())
-                    .and_then(|s| s.parse::<f64>().ok())
-                    .map(|v| (v * 1_000_000.0) as u64)
+                        if let Ok(tx_msg) = serde_json::from_str::<TxStreamMsg>(&text) {
+                            if let Some(inner) = tx_msg.transaction {
+                                if inner.tx_type.as_deref() == Some("Payment") {
+                                    let drops = match inner.amount {
+                                        Some(serde_json::Value::String(s)) => s.parse::<u64>().unwrap_or(1000),
+                                        _ => 1000,
+                                    };
+                                    let acc = inner.account.unwrap_or_else(|| "unknown".into());
+                                    let _ = tx.send(XrplStreamEvent::Tx { drops, account: acc }).await;
+                                }
+                            }
+                        }
+                    }
+                }
             }
-            _ => None,
         }
-    }
-
-    /// Converts a raw JSON-RPC response from `tx` into an energy-bounded input_shift
-    pub fn parse_tx_to_input(
-        &mut self,
-        json_str: &str,
-        sim: &SymplecticDDS,
-    ) -> Result<i64, String> {
-        let resp: XrplRpcResponse<TxResult> =
-            serde_json::from_str(json_str).map_err(|e| format!("JSON Parse Error: {}", e))?;
-
-        if resp.status != "success" && !resp.result.validated {
-            return Err("Transaction not validated or query failed".to_string());
-        }
-
-        let drops = resp
-            .result
-            .amount
-            .as_ref()
-            .and_then(Self::extract_drops)
-            .unwrap_or(0);
-
-        // Compute time-cadence weight if ledger close timestamp is present
-        let dt_factor = if let Some(close_date) = resp.result.date {
-            let prev = self.last_close_time.unwrap_or(close_date);
-            self.last_close_time = Some(close_date);
-            let dt = (close_date - prev).max(1);
-            1.0 / (dt as f64)
-        } else {
-            1.0
-        };
-
-        // Scalar drive signal: (Drops * Cadence) normalized to float
-        let raw_signal = (drops as f64 * self.drops_normalization) * dt_factor;
-
-        // Condition through separatrix envelope
-        Ok(self.coupler.condition_input(raw_signal, sim))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_parse_xrpl_tx_payload() {
-        let sample_rpc_response = r#"{
-            "result": {
-                "Account": "rUFCLJpWcd2yng9tvmCfV7Pq5yG59XTbsX",
-                "Amount": "100941437",
-                "Destination": "r9N4GDbG3vPujNAW9KYxWAvDUaZmEr3BRu",
-                "Fee": "12",
-                "date": 745812930,
-                "ledger_index": 106750290,
-                "validated": true
-            },
-            "status": "success"
-        }"#;
-
-        let sim = SymplecticDDS::new(0);
-        let coupler = TelemetryCoupler::new(10, 500_000);
-        // Normalize 100 XRP drops to ~100.0 scalar
-        let mut adapter = XrplTelemetryAdapter::new(coupler, 1e-6);
-
-        let input_shift = adapter.parse_tx_to_input(sample_rpc_response, &sim);
-        assert!(input_shift.is_ok());
-
-        let u = input_shift.unwrap();
-        // 100.941437 * 10 * 1.0 ≈ 1009
-        assert!(u > 1000 && u < 1020, "Conditioned input mismatch: got {}", u);
+        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
     }
 }
