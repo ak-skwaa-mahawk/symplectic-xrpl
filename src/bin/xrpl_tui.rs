@@ -27,12 +27,23 @@ enum DisplayMode {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() {
+    if let Err(e) = run_app().await {
+        eprintln!("\r\n[XRPL TUI Error]: {e}\r\n");
+    }
+}
+
+async fn run_app() -> Result<(), Box<dyn std::error::Error>> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
+
+    // Aggressively flush standard input before starting
+    while event::poll(Duration::from_millis(100)).unwrap_or(false) {
+        let _ = event::read();
+    }
 
     let (feed_tx, mut feed_rx) = mpsc::channel::<XrplStreamEvent>(2000);
     tokio::spawn(async move {
@@ -51,6 +62,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut total_admitted = 0u64;
     let mut connected = false;
     let mut mode = DisplayMode::Spatial;
+    let start_time = Instant::now();
 
     'main_loop: loop {
         while let Ok(ev) = feed_rx.try_recv() {
@@ -121,11 +133,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let top_text = if connected {
                 format!(
-                    " XRPL DYNAMIC PIPELINE {} | Ledger: #{} | Txs: {} | Epoch: #{} | Queue: {} | Adm: {} | 'm': Mode, 'q': Quit ",
+                    " XRPL PIPELINE {} | Ledger: #{} | Txs: {} | Epoch: #{} | Queue: {} | Adm: {} | 'm': Mode, 'q': Quit ",
                     mode_str, last_ledger_idx, current_tx_count, current_epoch, pending_txs.len(), total_admitted
                 )
             } else {
-                " XRPL DYNAMIC PIPELINE | Connecting to wss://s1.ripple.com:51233... ".to_string()
+                " XRPL PIPELINE | Connecting to wss://s1.ripple.com:51233... ".to_string()
             };
 
             let top_bar = Paragraph::new(top_text)
@@ -204,11 +216,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             f.render_widget(log_list, bot_chunks[1]);
         })?;
 
-        if event::poll(Duration::from_millis(33))? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press {
+        if event::poll(Duration::from_millis(33)).unwrap_or(false) {
+            if let Ok(Event::Key(key)) = event::read() {
+                // Ignore any keystrokes sent within the first 1000ms to debounce launch artifacts
+                if start_time.elapsed() > Duration::from_millis(1000) && key.kind == KeyEventKind::Press {
                     match key.code {
-                        KeyCode::Char('q') | KeyCode::Esc => break 'main_loop,
+                        KeyCode::Char('q') => break 'main_loop,
                         KeyCode::Char('m') => {
                             mode = match mode {
                                 DisplayMode::Spatial => DisplayMode::NormalModes,
