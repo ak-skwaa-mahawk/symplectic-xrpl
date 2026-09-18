@@ -58,7 +58,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut connected = false;
     let mut mode = DisplayMode::Spatial;
     let mut frame_count = 0u64;
-    let mut exit_reason;
+    let exit_reason;
 
     'main_loop: loop {
         frame_count += 1;
